@@ -19,6 +19,7 @@ const fs = require('fs');
 
 const WORKSPACE = process.env.OPENCLAW_WORKSPACE || path.resolve(__dirname, '../../..');
 const TOKEN_CACHE = path.join(WORKSPACE, 'data/x-oauth2-token-cache.json');
+const SECRETS_FILE = process.env.X_OAUTH2_SECRETS_FILE || path.join(WORKSPACE, '..', '..', 'secrets', 'x-oauth2-credentials.json');
 
 // ── OAuth 2.0 token management ───────────────────────────────────────────────
 
@@ -38,10 +39,23 @@ function saveTokenCache(data) {
   }, null, 2));
 }
 
+function getRefreshToken() {
+  // Priority: secrets file (always has latest rotated token) > token cache > env var (may be stale)
+  // X rotates refresh tokens on every use — the secrets file is the only reliable source
+  // after the first rotation.
+  try {
+    const s = JSON.parse(fs.readFileSync(SECRETS_FILE, 'utf8'));
+    if (s.refresh_token) return s.refresh_token;
+  } catch {}
+  const cache = loadTokenCache();
+  if (cache?.refresh_token) return cache.refresh_token;
+  return process.env.X_OAUTH2_REFRESH_TOKEN;
+}
+
 function getAccessToken() {
   const CLIENT_ID = process.env.X_OAUTH2_CLIENT_ID;
   const CLIENT_SECRET = process.env.X_OAUTH2_CLIENT_SECRET;
-  const REFRESH_TOKEN = process.env.X_OAUTH2_REFRESH_TOKEN;
+  const REFRESH_TOKEN = getRefreshToken();
 
   if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
     throw new Error('Missing X_OAUTH2_CLIENT_ID, X_OAUTH2_CLIENT_SECRET, or X_OAUTH2_REFRESH_TOKEN');
@@ -73,22 +87,28 @@ function getAccessToken() {
   const data = JSON.parse(res.stdout.toString());
   if (!data.access_token) {
     if (data.error === 'invalid_grant') {
-      throw new Error(`Token refresh failed (invalid_grant). Your refresh token has rotated. New token saved to: data/x-oauth2-new-refresh-token.txt — update X_OAUTH2_REFRESH_TOKEN in your env and restart.`);
+      throw new Error(`Token refresh failed (invalid_grant). Your refresh token may have rotated or expired. Re-run the OAuth 2.0 PKCE flow to get a new token.`);
     }
     throw new Error(`Token refresh failed: ${JSON.stringify(data)}`);
   }
 
-  // Save new refresh token if rotated
+  // Save rotated refresh token back to secrets file (canonical source)
+  // X rotates tokens on every use — if we don't persist, next run fails.
   if (data.refresh_token && data.refresh_token !== REFRESH_TOKEN) {
-    console.log('[bookmark-poll] ⚠️  Refresh token rotated — update X_OAUTH2_REFRESH_TOKEN in plist');
-    // Save to a file for the next run (protect with 0o600)
-    fs.writeFileSync(
-      path.join(WORKSPACE, 'data/x-oauth2-new-refresh-token.txt'),
-      data.refresh_token,
-      { mode: 0o600 }
-    );
-    // Update in-memory env so subsequent runs in same process use new token
-    process.env.X_OAUTH2_REFRESH_TOKEN = data.refresh_token;
+    console.log('[bookmark-poll] Refresh token rotated — saving to secrets file');
+    try {
+      const existing = JSON.parse(fs.readFileSync(SECRETS_FILE, 'utf8'));
+      existing.refresh_token = data.refresh_token;
+      existing.access_token = data.access_token;
+      existing.refreshed_at = new Date().toISOString();
+      fs.writeFileSync(SECRETS_FILE, JSON.stringify(existing, null, 2));
+    } catch {
+      fs.mkdirSync(path.dirname(SECRETS_FILE), { recursive: true });
+      fs.writeFileSync(SECRETS_FILE, JSON.stringify({
+        ...data,
+        refreshed_at: new Date().toISOString()
+      }, null, 2), { mode: 0o600 });
+    }
   }
 
   saveTokenCache(data);
