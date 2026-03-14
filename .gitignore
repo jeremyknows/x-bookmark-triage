@@ -1,0 +1,9 @@
+data/x-oauth2-token-cache.json
+data/x-oauth2-new-refresh-token.txt
+data/knowledge-intake-seen.json
+data/knowledge-intake-poll-state.json
+data/x-oauth2-secrets.json
+.env
+.env.local
+.DS_Store
+node_modules/
